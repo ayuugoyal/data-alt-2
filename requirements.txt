@@ -1,0 +1,6 @@
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+RPi.GPIO==0.7.1
+Adafruit-DHT==1.4.0
+spidev==3.6
