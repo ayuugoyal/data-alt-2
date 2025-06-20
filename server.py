@@ -20,8 +20,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 
 # Uncomment these imports when running on Raspberry Pi
-import RPi.GPIO as GPIO
-import Adafruit_DHT
+try:
+    import RPi.GPIO as GPIO
+    import Adafruit_DHT
+    SIMULATION_MODE = False
+except ImportError:
+    # Simulation mode for development/testing
+    SIMULATION_MODE = True
+    import random
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -94,50 +100,56 @@ class UltrasonicSensor(BaseSensor):
         
     def setup_pins(self):
         """Setup GPIO pins for ultrasonic sensor"""
-        try:
-            # Uncomment when running on Raspberry Pi
-            GPIO.setmode(GPIO.BCM)
-            GPIO.setup(self.trigger_pin, GPIO.OUT)
-            GPIO.setup(self.echo_pin, GPIO.IN)
-            GPIO.output(self.trigger_pin, False)
-            pass
-        except Exception as e:
-            logger.error(f"Error setting up ultrasonic pins: {e}")
+        if not SIMULATION_MODE:
+            try:
+                GPIO.setmode(GPIO.BCM)
+                GPIO.setup(self.trigger_pin, GPIO.OUT)
+                GPIO.setup(self.echo_pin, GPIO.IN)
+                GPIO.output(self.trigger_pin, False)
+                time.sleep(0.1)  # Let sensor settle
+            except Exception as e:
+                logger.error(f"Error setting up ultrasonic pins: {e}")
         
     def measure_distance(self) -> Optional[float]:
         """Measure distance using ultrasonic sensor (HC-SR04)"""
-        try:
+        if SIMULATION_MODE:
+            # Simulate reading for demo
+            return round(random.uniform(5, 250), 2)
             
-            # Uncomment when running on Raspberry Pi
+        try:
+            # Send 10us pulse to trigger
             GPIO.output(self.trigger_pin, True)
             time.sleep(0.00001)
             GPIO.output(self.trigger_pin, False)
             
-            start_time = time.time()
-            stop_time = time.time()
-            
-            # Wait for echo to start
+            # Wait for echo to start (with timeout)
+            pulse_start = time.time()
+            timeout = pulse_start + 1.0  # 1 second timeout
             while GPIO.input(self.echo_pin) == 0:
-                start_time = time.time()
-                if time.time() - start_time > 0.1:  # Timeout
+                pulse_start = time.time()
+                if pulse_start > timeout:
+                    logger.warning("Ultrasonic sensor timeout waiting for echo start")
                     return None
             
-            # Wait for echo to stop
+            # Wait for echo to stop (with timeout)
+            pulse_end = time.time()
+            timeout = pulse_end + 1.0  # 1 second timeout
             while GPIO.input(self.echo_pin) == 1:
-                stop_time = time.time()
-                if stop_time - start_time > 0.1:  # Timeout
+                pulse_end = time.time()
+                if pulse_end > timeout:
+                    logger.warning("Ultrasonic sensor timeout waiting for echo end")
                     return None
             
             # Calculate distance
-            time_elapsed = stop_time - start_time
-            distance = (time_elapsed * 34300) / 2  # Speed of sound = 343 m/s
+            pulse_duration = pulse_end - pulse_start
+            distance = (pulse_duration * 34300) / 2  # Speed of sound = 343 m/s
             
-            return round(distance, 2)
-            
-            
-            # Simulate reading for demo
-            # import random
-            # return round(random.uniform(5, 250), 2)
+            # Filter out invalid readings
+            if 2 <= distance <= 400:  # HC-SR04 valid range
+                return round(distance, 2)
+            else:
+                return None
+                
         except Exception as e:
             logger.error(f"Error measuring distance: {e}")
             return None
@@ -183,7 +195,7 @@ class MQ135Sensor(BaseSensor):
                  digital_pin: int = 25, analog_pin: int = 26):
         super().__init__(sensor_id, asset_id)
         self.digital_pin = digital_pin  # Digital output pin
-        self.analog_pin = analog_pin    # Using PWM to simulate analog reading
+        self.analog_pin = analog_pin    # Using capacitor discharge method for analog
         self.air_quality_ppm = 0.0
         self.gas_detected = False
         self.danger_threshold = 1000  # ppm
@@ -193,44 +205,49 @@ class MQ135Sensor(BaseSensor):
         
     def setup_pins(self):
         """Setup GPIO pins for MQ-135 sensor"""
-        try:
-            # Uncomment when running on Raspberry Pi
-            GPIO.setmode(GPIO.BCM)
-            GPIO.setup(self.digital_pin, GPIO.IN)
-            GPIO.setup(self.analog_pin, GPIO.IN)
-            pass
-        except Exception as e:
-            logger.error(f"Error setting up MQ-135 pins: {e}")
+        if not SIMULATION_MODE:
+            try:
+                GPIO.setmode(GPIO.BCM)
+                GPIO.setup(self.digital_pin, GPIO.IN)
+                # analog_pin will be configured dynamically in read_analog_value
+            except Exception as e:
+                logger.error(f"Error setting up MQ-135 pins: {e}")
         
     def read_air_quality(self) -> Optional[tuple]:
         """Read air quality from MQ-135 sensor"""
+        if SIMULATION_MODE:
+            # Simulate readings
+            gas_detected = random.choice([True, False])
+            ppm = random.uniform(50, 1500)
+            return gas_detected, round(ppm, 2)
+            
         try:
-            
-            # Uncomment when running on Raspberry Pi
             # Read digital pin for gas detection
-            gas_detected = GPIO.input(self.digital_pin)
+            gas_detected = bool(GPIO.input(self.digital_pin))
             
-            # For analog reading, we use a simple capacitor discharge method
-            # This is a workaround since Pi doesn't have built-in ADC
+            # Read analog value using capacitor discharge method
             def read_analog_value():
                 count = 0
+                # Discharge capacitor
                 GPIO.setup(self.analog_pin, GPIO.OUT)
                 GPIO.output(self.analog_pin, GPIO.LOW)
                 time.sleep(0.1)
                 
+                # Switch to input and count time to charge
                 GPIO.setup(self.analog_pin, GPIO.IN)
-                while (GPIO.input(self.analog_pin) == GPIO.LOW):
+                start_time = time.time()
+                while GPIO.input(self.analog_pin) == GPIO.LOW:
                     count += 1
-                    if count > 10000:  # Prevent infinite loop
+                    if count > 50000 or (time.time() - start_time) > 2:  # Prevent infinite loop
                         break
                 
                 return count
             
             analog_value = read_analog_value()
             
-            # Convert to approximate PPM (this is a simplified conversion)
-            # In reality, you'd need calibration for accurate readings
-            ppm = (analog_value / 1000) * 1000  # Simplified conversion
+            # Convert to approximate PPM (simplified conversion - needs calibration)
+            # This is a basic conversion, real implementation needs proper calibration
+            ppm = min(2000, (analog_value / 1000) * 100)  # Cap at 2000 PPM
             
             return gas_detected, round(ppm, 2)
 
@@ -240,27 +257,29 @@ class MQ135Sensor(BaseSensor):
             
     def update_reading(self):
         """Update air quality reading and check for alerts"""
-        gas_detected, ppm = self.read_air_quality()
-        if gas_detected is not None and ppm is not None:
-            with self.lock:
-                self.gas_detected = gas_detected
-                self.air_quality_ppm = ppm
-                self.last_reading_time = datetime.now(timezone.utc)
-                
-                if ppm > self.danger_threshold:
-                    alert = self.generate_alert(
-                        "Air Quality Critical",
-                        f"Dangerous air quality detected: {ppm} PPM. Immediate action required.",
-                        "Air_Quality_Critical"
-                    )
-                    self.alerts.append(alert)
-                elif ppm > self.warning_threshold:
-                    alert = self.generate_alert(
-                        "Air Quality Warning",
-                        f"Poor air quality detected: {ppm} PPM. Monitor closely.",
-                        "Air_Quality_Warning"
-                    )
-                    self.alerts.append(alert)
+        result = self.read_air_quality()
+        if result is not None:
+            gas_detected, ppm = result
+            if gas_detected is not None and ppm is not None:
+                with self.lock:
+                    self.gas_detected = gas_detected
+                    self.air_quality_ppm = ppm
+                    self.last_reading_time = datetime.now(timezone.utc)
+                    
+                    if ppm > self.danger_threshold:
+                        alert = self.generate_alert(
+                            "Air Quality Critical",
+                            f"Dangerous air quality detected: {ppm} PPM. Immediate action required.",
+                            "Air_Quality_Critical"
+                        )
+                        self.alerts.append(alert)
+                    elif ppm > self.warning_threshold:
+                        alert = self.generate_alert(
+                            "Air Quality Warning",
+                            f"Poor air quality detected: {ppm} PPM. Monitor closely.",
+                            "Air_Quality_Warning"
+                        )
+                        self.alerts.append(alert)
                     
     def get_reading(self) -> Dict:
         """Get current air quality reading"""
@@ -296,13 +315,23 @@ class DHT11Sensor(BaseSensor):
         
     def read_temp_humidity(self) -> tuple:
         """Read temperature and humidity from DHT11"""
-        try:
+        if SIMULATION_MODE:
+            # Simulate readings
+            humidity = random.uniform(30, 90)
+            temperature = random.uniform(15, 40)
+            return humidity, temperature
             
-            # Uncomment when running on Raspberry Pi
-            humidity, temperature = Adafruit_DHT.read_retry(Adafruit_DHT.DHT11, self.data_pin)
+        try:
+            humidity, temperature = Adafruit_DHT.read_retry(Adafruit_DHT.DHT11, self.data_pin, retries=3, delay_seconds=2)
             if humidity is not None and temperature is not None:
-                return humidity, temperature
+                # Validate readings (DHT11 specs: 20-80% RH, 0-50°C)
+                if 0 <= humidity <= 100 and -40 <= temperature <= 80:
+                    return humidity, temperature
+                else:
+                    logger.warning(f"DHT11 reading out of range: H={humidity}%, T={temperature}°C")
+                    return None, None
             else:
+                logger.warning("DHT11 failed to get valid reading")
                 return None, None
             
         except Exception as e:
@@ -376,40 +405,44 @@ class LDRSensor(BaseSensor):
         
     def setup_pins(self):
         """Setup GPIO pins for LDR sensor"""
-        try:
-            # Uncomment when running on Raspberry Pi
-            GPIO.setmode(GPIO.BCM)
-            pass
-        except Exception as e:
-            logger.error(f"Error setting up LDR pins: {e}")
+        if not SIMULATION_MODE:
+            try:
+                GPIO.setmode(GPIO.BCM)
+                # Pin will be configured dynamically in rc_time
+            except Exception as e:
+                logger.error(f"Error setting up LDR pins: {e}")
         
     def read_light_level(self) -> Optional[tuple]:
         """Read light level from LDR sensor using capacitor discharge method"""
-        try:
+        if SIMULATION_MODE:
+            # Simulate readings
+            raw_value = random.randint(100, 50000)
+            percentage = random.uniform(0, 100)
+            return raw_value, round(percentage, 2)
             
-            # Uncomment when running on Raspberry Pi
+        try:
             def rc_time():
                 count = 0
-                # Output on the pin for a short time to charge the capacitor
+                # Discharge capacitor
                 GPIO.setup(self.ldr_pin, GPIO.OUT)
                 GPIO.output(self.ldr_pin, GPIO.LOW)
                 time.sleep(0.1)
                 
-                # Change the pin back to input
+                # Switch to input and count
                 GPIO.setup(self.ldr_pin, GPIO.IN)
+                start_time = time.time()
                 
-                # Count until the pin goes high
-                while (GPIO.input(self.ldr_pin) == GPIO.LOW):
+                while GPIO.input(self.ldr_pin) == GPIO.LOW:
                     count += 1
-                    if count > 100000:  # Prevent infinite loop
+                    if count > 100000 or (time.time() - start_time) > 3:  # Prevent infinite loop
                         break
                 
                 return count
             
             raw_value = rc_time()
             
-            # Convert to percentage (calibrate these values based on your setup)
-            max_reading = 50000  # Adjust based on your environment
+            # Convert to percentage (adjust max_reading based on your environment)
+            max_reading = 50000  # Calibrate this value for your setup
             percentage = max(0, min(100, (1 - (raw_value / max_reading)) * 100))
             
             return raw_value, round(percentage, 2)
@@ -420,35 +453,37 @@ class LDRSensor(BaseSensor):
             
     def update_reading(self):
         """Update light level reading and check for alerts"""
-        raw_value, percentage = self.read_light_level()
-        if raw_value is not None and percentage is not None:
-            with self.lock:
-                self.light_level = raw_value
-                self.light_percentage = percentage
-                self.last_reading_time = datetime.now(timezone.utc)
-                
-                if percentage < self.dark_threshold:
-                    alert = self.generate_alert(
-                        "Light Level Alert",
-                        f"Dark environment detected: {percentage}% light level",
-                        "Light_Dark"
-                    )
-                    self.alerts.append(alert)
-                elif percentage > self.bright_threshold:
-                    alert = self.generate_alert(
-                        "Light Level Alert",
-                        f"Very bright environment detected: {percentage}% light level",
-                        "Light_Bright"
-                    )
-                    self.alerts.append(alert)
+        result = self.read_light_level()
+        if result is not None:
+            raw_value, percentage = result
+            if raw_value is not None and percentage is not None:
+                with self.lock:
+                    self.light_level = raw_value
+                    self.light_percentage = percentage
+                    self.last_reading_time = datetime.now(timezone.utc)
+                    
+                    if percentage < self.dark_threshold:
+                        alert = self.generate_alert(
+                            "Light Level Alert",
+                            f"Dark environment detected: {percentage}% light level",
+                            "Light_Dark"
+                        )
+                        self.alerts.append(alert)
+                    elif percentage > self.bright_threshold:
+                        alert = self.generate_alert(
+                            "Light Level Alert",
+                            f"Very bright environment detected: {percentage}% light level",
+                            "Light_Bright"
+                        )
+                        self.alerts.append(alert)
                     
     def get_reading(self) -> Dict:
         """Get current light level reading"""
         with self.lock:
             light_condition = "Normal"
-            if self.light_percentage > self.dark_threshold:
+            if self.light_percentage < self.dark_threshold:
                 light_condition = "Dark"
-            elif self.light_percentage < self.bright_threshold:
+            elif self.light_percentage > self.bright_threshold:
                 light_condition = "Very Bright"
                 
             return {
@@ -476,20 +511,22 @@ class PIRSensor(BaseSensor):
         
     def setup_pins(self):
         """Setup GPIO pins for PIR sensor"""
-        try:
-            # Uncomment when running on Raspberry Pi
-            GPIO.setmode(GPIO.BCM)
-            GPIO.setup(self.data_pin, GPIO.IN)
-            pass
-        except Exception as e:
-            logger.error(f"Error setting up PIR pins: {e}")
+        if not SIMULATION_MODE:
+            try:
+                GPIO.setmode(GPIO.BCM)
+                GPIO.setup(self.data_pin, GPIO.IN)
+                time.sleep(2)  # PIR sensor warm-up time
+            except Exception as e:
+                logger.error(f"Error setting up PIR pins: {e}")
         
     def read_motion(self) -> bool:
         """Read motion detection from PIR sensor"""
-        try:
+        if SIMULATION_MODE:
+            # Simulate motion detection
+            return random.choice([True, False])
             
-            # Uncomment when running on Raspberry Pi
-            return GPIO.input(self.data_pin)
+        try:
+            return bool(GPIO.input(self.data_pin))
             
         except Exception as e:
             logger.error(f"Error reading PIR: {e}")
@@ -701,7 +738,6 @@ async def health_check(request: Request):
             }],
             'shouldSubscribe': "true"
         }
-        
         # Create response with ngrok bypass headers
         content = json.dumps(response, indent=2)
         headers = {
