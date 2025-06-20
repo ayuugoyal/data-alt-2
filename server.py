@@ -24,10 +24,10 @@ try:
     import RPi.GPIO as GPIO
     import Adafruit_DHT
     SIMULATION_MODE = False
+    print("Real hardware mode enabled")
 except ImportError:
-    # Simulation mode for development/testing
     SIMULATION_MODE = True
-    import random
+    print("WARNING: Running in simulation mode - install RPi.GPIO and Adafruit_DHT")
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -113,46 +113,54 @@ class UltrasonicSensor(BaseSensor):
     def measure_distance(self) -> Optional[float]:
         """Measure distance using ultrasonic sensor (HC-SR04)"""
         if SIMULATION_MODE:
-            # Simulate reading for demo
-            return round(random.uniform(5, 250), 2)
+            return None  # Return None instead of random values
             
         try:
+            # Ensure pins are set correctly
+            GPIO.setmode(GPIO.BCM)
+            GPIO.setup(self.trigger_pin, GPIO.OUT)
+            GPIO.setup(self.echo_pin, GPIO.IN)
+            
+            # Clear trigger
+            GPIO.output(self.trigger_pin, False)
+            time.sleep(0.000002)  # 2 microseconds
+            
             # Send 10us pulse to trigger
             GPIO.output(self.trigger_pin, True)
-            time.sleep(0.00001)
+            time.sleep(0.00001)  # 10 microseconds
             GPIO.output(self.trigger_pin, False)
             
-            # Wait for echo to start (with timeout)
-            pulse_start = time.time()
-            timeout = pulse_start + 1.0  # 1 second timeout
+            # Wait for echo to start
+            timeout_start = time.time()
             while GPIO.input(self.echo_pin) == 0:
                 pulse_start = time.time()
-                if pulse_start > timeout:
-                    logger.warning("Ultrasonic sensor timeout waiting for echo start")
+                if pulse_start - timeout_start > 0.1:  # 100ms timeout
+                    logger.warning("Ultrasonic timeout waiting for echo start")
                     return None
             
-            # Wait for echo to stop (with timeout)
-            pulse_end = time.time()
-            timeout = pulse_end + 1.0  # 1 second timeout
+            # Wait for echo to stop
+            timeout_end = time.time()
             while GPIO.input(self.echo_pin) == 1:
                 pulse_end = time.time()
-                if pulse_end > timeout:
-                    logger.warning("Ultrasonic sensor timeout waiting for echo end")
+                if pulse_end - timeout_end > 0.1:  # 100ms timeout
+                    logger.warning("Ultrasonic timeout waiting for echo end")
                     return None
             
             # Calculate distance
             pulse_duration = pulse_end - pulse_start
-            distance = (pulse_duration * 34300) / 2  # Speed of sound = 343 m/s
+            distance = (pulse_duration * 34300) / 2
             
-            # Filter out invalid readings
-            if 2 <= distance <= 400:  # HC-SR04 valid range
+            # Validate HC-SR04 range (2cm to 400cm)
+            if 2 <= distance <= 400:
                 return round(distance, 2)
             else:
+                logger.warning(f"Distance out of range: {distance}cm")
                 return None
                 
         except Exception as e:
-            logger.error(f"Error measuring distance: {e}")
+            logger.error(f"Ultrasonic sensor error: {e}")
             return None
+
             
     def update_reading(self):
         """Update the current distance reading and check for alerts"""
@@ -216,45 +224,49 @@ class MQ135Sensor(BaseSensor):
     def read_air_quality(self) -> Optional[tuple]:
         """Read air quality from MQ-135 sensor"""
         if SIMULATION_MODE:
-            # Simulate readings
-            gas_detected = random.choice([True, False])
-            ppm = random.uniform(50, 1500)
-            return gas_detected, round(ppm, 2)
+            return None, None  # Return None instead of random values
             
         try:
-            # Read digital pin for gas detection
-            gas_detected = bool(GPIO.input(self.digital_pin))
+            GPIO.setmode(GPIO.BCM)
+            GPIO.setup(self.digital_pin, GPIO.IN)
             
-            # Read analog value using capacitor discharge method
-            def read_analog_value():
+            # Read digital pin
+            gas_detected = not GPIO.input(self.digital_pin)  # Usually LOW when gas detected
+            
+            # Read analog using RC circuit method
+            def read_analog():
                 count = 0
-                # Discharge capacitor
                 GPIO.setup(self.analog_pin, GPIO.OUT)
                 GPIO.output(self.analog_pin, GPIO.LOW)
-                time.sleep(0.1)
+                time.sleep(0.01)  # Discharge
                 
-                # Switch to input and count time to charge
                 GPIO.setup(self.analog_pin, GPIO.IN)
                 start_time = time.time()
+                
                 while GPIO.input(self.analog_pin) == GPIO.LOW:
                     count += 1
-                    if count > 50000 or (time.time() - start_time) > 2:  # Prevent infinite loop
+                    if count > 100000 or (time.time() - start_time) > 1:
                         break
                 
                 return count
             
-            analog_value = read_analog_value()
+            analog_reading = read_analog()
             
-            # Convert to approximate PPM (simplified conversion - needs calibration)
-            # This is a basic conversion, real implementation needs proper calibration
-            ppm = min(2000, (analog_value / 1000) * 100)  # Cap at 2000 PPM
+            # Convert to PPM (this needs calibration for your specific sensor)
+            # Basic conversion - you may need to adjust based on your sensor's datasheet
+            if analog_reading > 0:
+                ppm = (analog_reading / 10000) * 1000  # Simplified conversion
+                ppm = min(ppm, 2000)  # Cap at reasonable max
+            else:
+                ppm = 0
             
             return gas_detected, round(ppm, 2)
 
         except Exception as e:
-            logger.error(f"Error reading air quality: {e}")
+            logger.error(f"MQ135 sensor error: {e}")
             return None, None
-            
+
+
     def update_reading(self):
         """Update air quality reading and check for alerts"""
         result = self.read_air_quality()
@@ -316,28 +328,33 @@ class DHT11Sensor(BaseSensor):
     def read_temp_humidity(self) -> tuple:
         """Read temperature and humidity from DHT11"""
         if SIMULATION_MODE:
-            # Simulate readings
-            humidity = random.uniform(30, 90)
-            temperature = random.uniform(15, 40)
-            return humidity, temperature
+            return None, None  # Return None instead of random values
             
         try:
-            humidity, temperature = Adafruit_DHT.read_retry(Adafruit_DHT.DHT11, self.data_pin, retries=3, delay_seconds=2)
+            # Use proper DHT11 reading with retries
+            humidity, temperature = Adafruit_DHT.read_retry(
+                Adafruit_DHT.DHT11, 
+                self.data_pin, 
+                retries=5, 
+                delay_seconds=1
+            )
+            
             if humidity is not None and temperature is not None:
-                # Validate readings (DHT11 specs: 20-80% RH, 0-50°C)
-                if 0 <= humidity <= 100 and -40 <= temperature <= 80:
-                    return humidity, temperature
+                # Validate DHT11 ranges
+                if 20 <= humidity <= 95 and 0 <= temperature <= 60:
+                    return round(humidity, 1), round(temperature, 1)
                 else:
-                    logger.warning(f"DHT11 reading out of range: H={humidity}%, T={temperature}°C")
+                    logger.warning(f"DHT11 values out of range: H={humidity}%, T={temperature}°C")
                     return None, None
             else:
-                logger.warning("DHT11 failed to get valid reading")
+                logger.warning("DHT11 returned None values")
                 return None, None
-            
+                
         except Exception as e:
-            logger.error(f"Error reading DHT11: {e}")
+            logger.error(f"DHT11 sensor error: {e}")
             return None, None
-            
+
+
     def update_reading(self):
         """Update temperature and humidity readings and check for alerts"""
         humidity, temperature = self.read_temp_humidity()
@@ -413,14 +430,13 @@ class LDRSensor(BaseSensor):
                 logger.error(f"Error setting up LDR pins: {e}")
         
     def read_light_level(self) -> Optional[tuple]:
-        """Read light level from LDR sensor using capacitor discharge method"""
+        """Read light level from LDR sensor"""
         if SIMULATION_MODE:
-            # Simulate readings
-            raw_value = random.randint(100, 50000)
-            percentage = random.uniform(0, 100)
-            return raw_value, round(percentage, 2)
+            return None, None  # Return None instead of random values
             
         try:
+            GPIO.setmode(GPIO.BCM)
+            
             def rc_time():
                 count = 0
                 # Discharge capacitor
@@ -428,29 +444,42 @@ class LDRSensor(BaseSensor):
                 GPIO.output(self.ldr_pin, GPIO.LOW)
                 time.sleep(0.1)
                 
-                # Switch to input and count
+                # Count time to charge
                 GPIO.setup(self.ldr_pin, GPIO.IN)
                 start_time = time.time()
                 
                 while GPIO.input(self.ldr_pin) == GPIO.LOW:
                     count += 1
-                    if count > 100000 or (time.time() - start_time) > 3:  # Prevent infinite loop
+                    if count > 1000000 or (time.time() - start_time) > 2:
                         break
                 
                 return count
             
-            raw_value = rc_time()
+            raw_reading = rc_time()
             
-            # Convert to percentage (adjust max_reading based on your environment)
-            max_reading = 50000  # Calibrate this value for your setup
-            percentage = max(0, min(100, (1 - (raw_value / max_reading)) * 100))
-            
-            return raw_value, round(percentage, 2)
-            
+            if raw_reading > 0:
+                # Convert to percentage (adjust these values based on your setup)
+                max_dark = 1000000  # Very dark reading
+                min_bright = 1000   # Very bright reading
+                
+                if raw_reading >= max_dark:
+                    percentage = 0  # Very dark
+                elif raw_reading <= min_bright:
+                    percentage = 100  # Very bright
+                else:
+                    # Linear interpolation
+                    percentage = 100 * (1 - ((raw_reading - min_bright) / (max_dark - min_bright)))
+                    percentage = max(0, min(100, percentage))
+                
+                return raw_reading, round(percentage, 2)
+            else:
+                return None, None
+                
         except Exception as e:
-            logger.error(f"Error reading LDR: {e}")
+            logger.error(f"LDR sensor error: {e}")
             return None, None
-            
+
+
     def update_reading(self):
         """Update light level reading and check for alerts"""
         result = self.read_light_level()
@@ -519,18 +548,23 @@ class PIRSensor(BaseSensor):
             except Exception as e:
                 logger.error(f"Error setting up PIR pins: {e}")
         
-    def read_motion(self) -> bool:
+    def read_motion(self) -> Optional[bool]:
         """Read motion detection from PIR sensor"""
         if SIMULATION_MODE:
-            # Simulate motion detection
-            return random.choice([True, False])
+            return None  # Return None instead of random values
             
         try:
-            return bool(GPIO.input(self.data_pin))
+            GPIO.setmode(GPIO.BCM)
+            GPIO.setup(self.data_pin, GPIO.IN)
+            
+            # PIR output is HIGH when motion detected
+            motion = GPIO.input(self.data_pin)
+            return bool(motion)
             
         except Exception as e:
-            logger.error(f"Error reading PIR: {e}")
-            return False
+            logger.error(f"PIR sensor error: {e}")
+            return None
+
             
     def update_reading(self):
         """Update motion detection and check for alerts"""
@@ -795,16 +829,44 @@ async def startup_event():
     logger.info("Background reading thread started")
     logger.info("Multi-Sensor API Server started with 5 sensors - Direct GPIO connections")
 
+def cleanup_gpio():
+    """Proper GPIO cleanup"""
+    try:
+        if not SIMULATION_MODE:
+            GPIO.cleanup()
+            logger.info("GPIO cleaned up successfully")
+    except Exception as e:
+        logger.error(f"GPIO cleanup error: {e}")
+
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Cleanup when the app shuts down"""
-    try:
-        # Uncomment when using real GPIO
-        GPIO.cleanup()
-        logger.info("GPIO cleaned up")
-    except Exception as e:
-        logger.error(f"Cleanup error: {e}")
+    """Enhanced cleanup"""
+    cleanup_gpio()
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000) 
+
+# Fix 7: Install required packages
+"""
+Run these commands on your Raspberry Pi:
+
+sudo apt update
+sudo apt install python3-pip
+pip3 install RPi.GPIO
+pip3 install Adafruit_DHT
+pip3 install fastapi uvicorn
+
+# For DHT sensor, you might also need:
+sudo apt install libgpiod2
+"""
+
+# Fix 8: Check your wiring connections
+"""
+Verify these connections:
+- Ultrasonic HC-SR04: VCC->5V, GND->GND, Trig->GPIO18, Echo->GPIO24
+- MQ-135: VCC->5V, GND->GND, DO->GPIO25, AO->GPIO26 (with RC circuit)
+- DHT11: VCC->3.3V, GND->GND, DATA->GPIO22
+- LDR: One end to 3.3V, other to GPIO21 and through capacitor to GND
+- PIR: VCC->5V, GND->GND, OUT->GPIO23
+"""
